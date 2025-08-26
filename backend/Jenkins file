@@ -1,0 +1,84 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_REPO = "deviprasad3722/backend-image"    // DockerHub repo
+        IMAGE_NAME     = "backend"
+
+        GIT_CRED_ID    = "github-creds"       // Jenkins GitHub PAT/SSH credentials
+        DOCKERHUB_CRED = "dockerhub-creds"    // Jenkins DockerHub credentials
+    }
+
+    options {
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout Repo') {
+            steps {
+                git branch: 'main',
+                    credentialsId: "${GIT_CRED_ID}",
+                    url: 'git@github.com:DeviPrasad372002/3-tier-app.git'
+            }
+        }
+
+        stage('Login to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CRED}",
+                                                  usernameVariable: 'DOCKER_USER',
+                                                  passwordVariable: 'DOCKER_PSW')]) {
+                    sh '''
+                        echo $DOCKER_PSW | docker login -u $DOCKER_USER --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('Build & Push Backend Image') {
+            steps {
+                dir('frontend-backend/backend') {
+                    script {
+                        def imageTag = "${DOCKERHUB_REPO}:${BUILD_NUMBER}"
+                        sh """
+                            docker build -t ${imageTag} .
+                            docker push ${imageTag}
+                            docker tag ${imageTag} ${DOCKERHUB_REPO}:latest
+                            docker push ${DOCKERHUB_REPO}:latest
+                            docker system prune -f
+                        """
+                        env.BACKEND_TAG = imageTag
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Minikube') {
+            steps {
+                dir('configuration-files') {
+                    script {
+                        sh """
+                            kubectl config use-context minikube
+                            
+                            # update deployment image if deployment already exists
+                            kubectl set image deployment/backend backend-container=${BACKEND_TAG} --record || true
+
+                            # apply manifest (first time deploy or updates)
+                            kubectl apply -f deployment-backend.yaml || true
+
+                            kubectl rollout status deployment/backend --timeout=120s
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Backend image built, pushed to DockerHub & deployed to Minikube."
+        }
+        failure {
+            echo "❌ Backend pipeline failed"
+        }
+    }
+}

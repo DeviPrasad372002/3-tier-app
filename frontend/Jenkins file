@@ -1,0 +1,94 @@
+pipeline {
+    agent any
+
+    environment {
+        ACR_NAME = "prasadacr"
+        ACR_LOGIN_SERVER = "prasadacr.azurecr.io"
+        IMAGE_NAME = "frontend"
+
+        GIT_CRED_ID = "github-creds"                       // GitHub PAT/SSH key for manifests repo
+        DEPLOY_REPO = "https://github.com/DeviPrasad372002/manifest-files.git" // Manifests repo
+        DEPLOY_BRANCH = "main"
+        DEPLOY_FILE = "deployment-frontend.yaml"           // Frontend deployment manifest
+
+        // Extra timeouts for slow TLS connections
+        DOCKER_CLIENT_TIMEOUT = "300"
+        COMPOSE_HTTP_TIMEOUT  = "300"
+    }
+
+    stages {
+        stage('Checkout Frontend') {
+            steps {
+                git branch: 'main',
+                    credentialsId: "${GIT_CRED_ID}",
+                    url: 'https://github.com/DeviPrasad372002/frontend_code.git'
+            }
+        }
+
+        stage('Login to ACR') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'acr-creds',
+                                                  usernameVariable: 'DOCKER_USER',
+                                                  passwordVariable: 'DOCKER_PSW')]) {
+                    sh '''
+                        echo $DOCKER_PSW | docker login $ACR_LOGIN_SERVER -u $DOCKER_USER --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('Build & Push Frontend Image') {
+            steps {
+                script {
+                    def imageTag = "${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${BUILD_NUMBER}"
+                    sh "docker build -t ${imageTag} ."
+                    sh "docker push ${imageTag}"
+                    sh "docker tag ${imageTag} ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
+                    sh "docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
+                    env.FRONTEND_TAG = imageTag
+                }
+            }
+        }
+
+        stage('Update Deployment Repo') {
+            steps {
+                dir('deploy-repo') {
+                    // clone manifests repo
+                    git branch: "${DEPLOY_BRANCH}",
+                        credentialsId: "${GIT_CRED_ID}",
+                        url: "${DEPLOY_REPO}"
+
+                    withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                        script {
+                            sh """
+                            # update deployment image
+                            sed -i "s#image: ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:.*#image: ${FRONTEND_TAG}#" ${DEPLOY_FILE}
+
+                            # configure git identity
+                            git config user.email "jenkins@ci.com"
+                            git config user.name "Jenkins CI"
+
+                            # commit changes
+                            git add ${DEPLOY_FILE}
+                            git commit -m "Update frontend image to ${FRONTEND_TAG}" || echo "No changes to commit"
+
+                            # overwrite remote with credentials for push
+                            git remote set-url origin https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/DeviPrasad372002/manifest-files.git
+                            git push origin ${DEPLOY_BRANCH}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Frontend image built, pushed & manifest updated. ArgoCD will sync automatically."
+        }
+        failure {
+            echo "❌ Frontend pipeline failed"
+        }
+    }
+}
