@@ -7,6 +7,7 @@ pipeline {
 
         GIT_CRED_ID    = "github-creds"       // Jenkins GitHub PAT/SSH credentials
         DOCKERHUB_CRED = "dockerhub-creds"    // Jenkins DockerHub credentials
+        KUBECONFIG     = "/var/lib/jenkins/.kube/config"   // Jenkins Kubeconfig
     }
 
     options {
