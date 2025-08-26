@@ -2,36 +2,33 @@ pipeline {
     agent any
 
     environment {
-        ACR_NAME = "prasadacr"
-        ACR_LOGIN_SERVER = "prasadacr.azurecr.io"
-        IMAGE_NAME = "frontend"
+        DOCKERHUB_REPO = "deviprasad3722/frontend-image"   // DockerHub repo for frontend
+        IMAGE_NAME     = "frontend"
 
-        GIT_CRED_ID = "github-creds"                       // GitHub PAT/SSH key for manifests repo
-        DEPLOY_REPO = "https://github.com/DeviPrasad372002/manifest-files.git" // Manifests repo
-        DEPLOY_BRANCH = "main"
-        DEPLOY_FILE = "deployment-frontend.yaml"           // Frontend deployment manifest
+        GIT_CRED_ID    = "github-creds"       // Jenkins GitHub PAT/SSH credentials
+        DOCKERHUB_CRED = "dockerhub-creds"    // Jenkins DockerHub credentials
+    }
 
-        // Extra timeouts for slow TLS connections
-        DOCKER_CLIENT_TIMEOUT = "300"
-        COMPOSE_HTTP_TIMEOUT  = "300"
+    options {
+        timestamps()
     }
 
     stages {
-        stage('Checkout Frontend') {
+        stage('Checkout Repo') {
             steps {
                 git branch: 'main',
                     credentialsId: "${GIT_CRED_ID}",
-                    url: 'https://github.com/DeviPrasad372002/frontend_code.git'
+                    url: 'https://github.com/DeviPrasad372002/3-tier-app.git'
             }
         }
 
-        stage('Login to ACR') {
+        stage('Login to DockerHub') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'acr-creds',
+                withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CRED}",
                                                   usernameVariable: 'DOCKER_USER',
                                                   passwordVariable: 'DOCKER_PSW')]) {
                     sh '''
-                        echo $DOCKER_PSW | docker login $ACR_LOGIN_SERVER -u $DOCKER_USER --password-stdin
+                        echo $DOCKER_PSW | docker login -u $DOCKER_USER --password-stdin
                     '''
                 }
             }
@@ -39,44 +36,37 @@ pipeline {
 
         stage('Build & Push Frontend Image') {
             steps {
-                script {
-                    def imageTag = "${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${BUILD_NUMBER}"
-                    sh "docker build -t ${imageTag} ."
-                    sh "docker push ${imageTag}"
-                    sh "docker tag ${imageTag} ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
-                    sh "docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
-                    env.FRONTEND_TAG = imageTag
+                dir('frontend') {
+                    script {
+                        def imageTag = "${DOCKERHUB_REPO}:${BUILD_NUMBER}"
+                        sh """
+                            docker build -t ${imageTag} .
+                            docker push ${imageTag}
+                            docker tag ${imageTag} ${DOCKERHUB_REPO}:latest
+                            docker push ${DOCKERHUB_REPO}:latest
+                            docker system prune -f
+                        """
+                        env.FRONTEND_TAG = imageTag
+                    }
                 }
             }
         }
 
-        stage('Update Deployment Repo') {
+        stage('Deploy to Minikube') {
             steps {
-                dir('deploy-repo') {
-                    // clone manifests repo
-                    git branch: "${DEPLOY_BRANCH}",
-                        credentialsId: "${GIT_CRED_ID}",
-                        url: "${DEPLOY_REPO}"
+                dir('configuration-files') {
+                    script {
+                        sh """
+                            kubectl config use-context minikube
+                            
+                            # update deployment image if exists
+                            kubectl set image deployment/frontend frontend-container=${FRONTEND_TAG} --record || true
 
-                    withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
-                        script {
-                            sh """
-                            # update deployment image
-                            sed -i "s#image: ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:.*#image: ${FRONTEND_TAG}#" ${DEPLOY_FILE}
+                            # apply manifest (initial deploy or updates)
+                            kubectl apply -f deployment-frontend.yaml || true
 
-                            # configure git identity
-                            git config user.email "jenkins@ci.com"
-                            git config user.name "Jenkins CI"
-
-                            # commit changes
-                            git add ${DEPLOY_FILE}
-                            git commit -m "Update frontend image to ${FRONTEND_TAG}" || echo "No changes to commit"
-
-                            # overwrite remote with credentials for push
-                            git remote set-url origin https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/DeviPrasad372002/manifest-files.git
-                            git push origin ${DEPLOY_BRANCH}
-                            """
-                        }
+                            kubectl rollout status deployment/frontend --timeout=120s
+                        """
                     }
                 }
             }
@@ -85,7 +75,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ Frontend image built, pushed & manifest updated. ArgoCD will sync automatically."
+            echo "✅ Frontend image built, pushed to DockerHub & deployed to Minikube."
         }
         failure {
             echo "❌ Frontend pipeline failed"

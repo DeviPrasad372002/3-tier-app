@@ -18,7 +18,7 @@ pipeline {
             steps {
                 git branch: 'main',
                     credentialsId: "${GIT_CRED_ID}",
-                    url: 'git@github.com:DeviPrasad372002/3-tier-app.git'
+                    url: 'https://github.com/DeviPrasad372002/3-tier-app.git'
             }
         }
 
@@ -36,7 +36,7 @@ pipeline {
 
         stage('Build & Push Backend Image') {
             steps {
-                dir('frontend-backend/backend') {
+                dir('backend') {
                     script {
                         def imageTag = "${DOCKERHUB_REPO}:${BUILD_NUMBER}"
                         sh """
@@ -52,19 +52,21 @@ pipeline {
             }
         }
 
-        stage('Deploy to Minikube') {
+        stage('Deploy PostgreSQL & Backend to Minikube') {
             steps {
                 dir('configuration-files') {
                     script {
                         sh """
                             kubectl config use-context minikube
-                            
-                            # update deployment image if deployment already exists
-                            kubectl set image deployment/backend backend-container=${BACKEND_TAG} --record || true
 
-                            # apply manifest (first time deploy or updates)
+                            # Deploy PostgreSQL first
+                            kubectl apply -f deployment-db.yaml
+
+                            # Deploy/Update backend deployment
+                            kubectl set image deployment/backend backend-container=${BACKEND_TAG} --record || true
                             kubectl apply -f deployment-backend.yaml || true
 
+                            # Wait for backend pod to be ready
                             kubectl rollout status deployment/backend --timeout=120s
                         """
                     }
@@ -75,7 +77,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ Backend image built, pushed to DockerHub & deployed to Minikube."
+            echo "✅ PostgreSQL & Backend image built, pushed to DockerHub & deployed to Minikube."
         }
         failure {
             echo "❌ Backend pipeline failed"
